@@ -16,13 +16,32 @@ var projects = map[string][]string{
 
 func main() {
 	r := gin.Default()
+
+	r.GET("/projects/headers", func(c *gin.Context) {
+		headers := make(map[string][]string)
+		for name, values := range c.Request.Header {
+			headers[name] = values
+		}
+		c.JSON(http.StatusOK, gin.H{"headers": headers})
+	})
+
 	r.Use(jwtMiddleware())
+
 	r.GET("/projects", getProjects)
+
 	r.Run(":8080")
 }
 
 func jwtMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// In ra tất cả các header
+		fmt.Println("All Headers:")
+		for key, values := range c.Request.Header {
+			for _, value := range values {
+				fmt.Printf("%s: %s\n", key, value)
+			}
+		}
+
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header is missing"})

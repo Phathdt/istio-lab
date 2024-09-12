@@ -10,6 +10,10 @@ spec:
   jwtRules:
     - issuer: 'auth-service'
       jwksUri: 'http://auth-service.default.svc.cluster.local/auth/.well-known/jwks.json'
+      forwardOriginalToken: true
+      fromHeaders:
+        - name: Authorization
+          prefix: 'Bearer '
 ---
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
@@ -25,7 +29,3 @@ spec:
     - from:
         - source:
             requestPrincipals: ['*']
-      to:
-        - operation:
-            methods: ['GET']
-            paths: ['/projects']
