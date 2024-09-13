@@ -17,14 +17,6 @@ var projects = map[string][]string{
 func main() {
 	r := gin.Default()
 
-	r.GET("/projects/headers", func(c *gin.Context) {
-		headers := make(map[string][]string)
-		for name, values := range c.Request.Header {
-			headers[name] = values
-		}
-		c.JSON(http.StatusOK, gin.H{"headers": headers})
-	})
-
 	r.Use(jwtMiddleware())
 
 	r.GET("/projects", getProjects)

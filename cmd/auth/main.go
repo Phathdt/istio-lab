@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"math/big"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,7 +17,51 @@ import (
 var (
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
+	tokenStore *TokenStore
 )
+
+type TokenInfo struct {
+	ExpireAt time.Time
+}
+
+type TokenStore struct {
+	tokens map[string]TokenInfo
+	mutex  sync.RWMutex
+}
+
+func NewTokenStore() *TokenStore {
+	return &TokenStore{
+		tokens: make(map[string]TokenInfo),
+	}
+}
+
+func (ts *TokenStore) Set(tid string, info TokenInfo) {
+	ts.mutex.Lock()
+	defer ts.mutex.Unlock()
+	ts.tokens[tid] = info
+}
+
+func (ts *TokenStore) Get(tid string) (TokenInfo, bool) {
+	ts.mutex.RLock()
+	defer ts.mutex.RUnlock()
+	info, exists := ts.tokens[tid]
+	return info, exists
+}
+
+func (ts *TokenStore) Delete(tid string) {
+	ts.mutex.Lock()
+	defer ts.mutex.Unlock()
+	delete(ts.tokens, tid)
+}
+
+func generateTID() (string, error) {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
 func init() {
 	var err error
@@ -49,6 +96,8 @@ yppH6MV2h4UZA8lM0JuZgQQzNytotEjbdP3a4DLUIzAOg4qpk76Kvw==
 		panic(err)
 	}
 	publicKey = &privateKey.PublicKey
+
+	tokenStore = NewTokenStore()
 }
 
 func main() {
@@ -56,7 +105,9 @@ func main() {
 	auth := r.Group("/auth")
 	{
 		auth.POST("/login", login)
+		auth.POST("/logout", logout)
 		auth.GET("/.well-known/jwks.json", jwks)
+		auth.GET("/validate", validate)
 	}
 	r.Run(":8080")
 }
@@ -72,18 +123,29 @@ func login(c *gin.Context) {
 		return
 	}
 
-	// Xác thực credentials (giả định)
+	// Authenticate credentials (assumed)
 	if credentials.Username != "user1" || credentials.Password != "password1" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	// Tạo JWT
+	// Generate TID
+	tid, err := generateTID()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate TID"})
+		return
+	}
+
+	// Create JWT
+	expirationTime := time.Now().Add(24 * time.Hour)
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"sub": credentials.Username,
-		"iss": "auth-service",
-		"iat": time.Now().Unix(),
-		"exp": time.Now().Add(time.Hour * 24).Unix(),
+		"sub":      credentials.Username,
+		"iss":      "auth-service",
+		"iat":      time.Now().Unix(),
+		"exp":      expirationTime.Unix(),
+		"username": credentials.Username,
+		"role":     "normal",
+		"tid":      tid,
 	})
 
 	tokenString, err := token.SignedString(privateKey)
@@ -92,7 +154,49 @@ func login(c *gin.Context) {
 		return
 	}
 
+	// Store TID in memory
+	tokenStore.Set(tid, TokenInfo{
+		ExpireAt: expirationTime,
+	})
+
 	c.JSON(http.StatusOK, gin.H{"token": tokenString})
+}
+
+func logout(c *gin.Context) {
+	tokenString := c.GetHeader("Authorization")
+	if tokenString == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing token"})
+		return
+	}
+
+	tokenString = tokenString[7:] // Remove "Bearer " prefix
+
+	// Parse token to get TID
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		return publicKey, nil
+	})
+
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not parse token claims"})
+		return
+	}
+
+	tid, ok := claims["tid"].(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not get TID from token"})
+		return
+	}
+
+	// Remove TID from memory store
+	tokenStore.Delete(tid)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
 
 func jwks(c *gin.Context) {
@@ -113,4 +217,58 @@ func jwks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, jwks)
+}
+
+func validate(c *gin.Context) {
+	tokenString := c.GetHeader("Authorization")
+	if tokenString == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing token"})
+		return
+	}
+
+	tokenString = tokenString[7:] // Remove "Bearer " prefix
+
+	// Parse token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		return publicKey, nil
+	})
+
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not parse token claims"})
+		return
+	}
+
+	tid, ok := claims["tid"].(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not get TID from token"})
+		return
+	}
+
+	// Check TID in memory store
+	tokenInfo, exists := tokenStore.Get(tid)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	// Check if token has expired
+	if time.Now().After(tokenInfo.ExpireAt) {
+		tokenStore.Delete(tid)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token has expired"})
+		return
+	}
+
+	c.Header("x-current-user", claims["username"].(string))
+
+	c.JSON(http.StatusOK, gin.H{
+		"valid":    true,
+		"username": claims["username"],
+		"role":     claims["role"],
+	})
 }

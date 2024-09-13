@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: project-service
-          image: phathdt379/project-service:v5
+          image: phathdt379/project-service:v8
           ports:
             - containerPort: 8080
 ---

@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: auth-service
-          image: phathdt379/auth-service:v3
+          image: phathdt379/auth-service:v8
           ports:
             - containerPort: 8080
 ---
